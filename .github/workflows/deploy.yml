@@ -1,0 +1,263 @@
+name: Deploy to VPS
+
+# Manual only — never deploys automatically on push.
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type "deploy" to confirm you want to sync the selected branch/commit to production'
+        required: true
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-lincolncountybuildings
+  cancel-in-progress: false
+
+jobs:
+  # ---------------------------------------------------------------------
+  # Always runs. Confirms the checkout actually has the files we expect
+  # to deploy, before any network/SSH activity happens.
+  # ---------------------------------------------------------------------
+  preflight:
+    name: Preflight checks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require explicit confirmation
+        run: |
+          if [ "${{ github.event.inputs.confirm }}" != "deploy" ]; then
+            echo "::error::Run cancelled — the 'confirm' input must be exactly 'deploy'."
+            exit 1
+          fi
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Record what is being deployed
+        run: |
+          echo "Branch/ref: ${{ github.ref_name }}"
+          echo "Commit:     ${{ github.sha }}"
+          git log -1 --format='%H %an <%ae> %s'
+
+      - name: Verify required site files exist in this checkout
+        run: |
+          set -euo pipefail
+          missing=0
+          for f in index.html assets/css/style.css assets/css/responsive.css assets/js/main.js assets/js/animations.js assets/images/logo-old-hickory-dealer.png; do
+            if [ ! -s "$f" ]; then
+              echo "::error::Missing or empty required file: $f"
+              missing=1
+            fi
+          done
+          html_count=$(find . -maxdepth 1 -name '*.html' | wc -l)
+          echo "Found $html_count top-level HTML pages."
+          if [ "$html_count" -lt 10 ]; then
+            echo "::error::Expected at least 10 top-level HTML pages, found $html_count — refusing to deploy a possibly broken checkout."
+            missing=1
+          fi
+          if [ "$missing" -ne 0 ]; then
+            exit 1
+          fi
+          echo "Preflight OK."
+
+  # ---------------------------------------------------------------------
+  # Backs up the current remote directory, then rsyncs only the real
+  # static site files over SSH using a pinned host key. No --delete:
+  # this only adds/overwrites files, it never removes anything on the
+  # server, so .well-known/, CloudPanel config, and any out-of-band
+  # files are never touched.
+  #
+  # Every remote command below is built as ONE flat, double-quoted
+  # string passed to ssh as a single argument (not a heredoc, and not
+  # multiple trailing argv words) specifically to avoid both: (a) the
+  # YAML-block-scalar-vs-heredoc-terminator indentation conflict, and
+  # (b) OpenSSH's well-known behavior of rejoining multiple trailing
+  # command arguments into one string on the remote side, which can
+  # silently mangle quoting. A single pre-built string sidesteps both.
+  # ---------------------------------------------------------------------
+  deploy:
+    name: Deploy via rsync over SSH
+    needs: preflight
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up pinned SSH known_hosts and deploy key
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+
+          printf '%s\n' "${{ secrets.VPS_SSH_HOST_KEY }}" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
+          if [ ! -s ~/.ssh/known_hosts ]; then
+            echo "::error::VPS_SSH_HOST_KEY secret is empty — refusing to connect without a pinned host key."
+            exit 1
+          fi
+
+          printf '%s\n' "${{ secrets.VPS_SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          if [ ! -s ~/.ssh/deploy_key ]; then
+            echo "::error::VPS_SSH_KEY secret is empty."
+            exit 1
+          fi
+
+          echo "SSH_OPTS=-i $HOME/.ssh/deploy_key -o UserKnownHostsFile=$HOME/.ssh/known_hosts -o StrictHostKeyChecking=yes -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=15" >> "$GITHUB_ENV"
+
+      - name: Validate destination, confirm non-root, ensure directory exists
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+          VPS_REMOTE_PATH: ${{ secrets.VPS_REMOTE_PATH }}
+        run: |
+          set -euo pipefail
+          case "$VPS_REMOTE_PATH" in
+            */lincolncountybuildings.preciseclientdemo.online*) ;;
+            *)
+              echo "::error::VPS_REMOTE_PATH ('$VPS_REMOTE_PATH') does not look like the expected site directory. Refusing to deploy."
+              exit 1
+              ;;
+          esac
+
+          REMOTE_CMD="set -euo pipefail; W=\$(whoami); echo \"Connected as: \$W\"; if [ \"\$W\" = root ]; then echo '::error::Refusing to deploy as root - must use the scoped CloudPanel site user.'; exit 1; fi; mkdir -p '$VPS_REMOTE_PATH'; if [ ! -d '$VPS_REMOTE_PATH' ]; then echo '::error::Target directory does not exist and could not be created: $VPS_REMOTE_PATH'; exit 1; fi; echo \"Target directory confirmed: $VPS_REMOTE_PATH\"; ls -la '$VPS_REMOTE_PATH' | head -20"
+
+          ssh $SSH_OPTS "$VPS_USER@$VPS_HOST" "$REMOTE_CMD"
+
+      - name: Back up current remote files before sync
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+          VPS_REMOTE_PATH: ${{ secrets.VPS_REMOTE_PATH }}
+        run: |
+          set -euo pipefail
+          STAMP=$(date -u +%Y%m%d-%H%M%S)
+          PARENT_DIR=$(dirname "$VPS_REMOTE_PATH")
+          BASE_DIR=$(basename "$VPS_REMOTE_PATH")
+
+          REMOTE_CMD="set -euo pipefail; mkdir -p \"\$HOME/deploy-backups\"; if [ -d '$VPS_REMOTE_PATH' ] && [ \"\$(ls -A '$VPS_REMOTE_PATH' 2>/dev/null)\" ]; then tar -czf \"\$HOME/deploy-backups/htdocs-backup-$STAMP.tar.gz\" -C '$PARENT_DIR' '$BASE_DIR'; echo \"Backup written to \$HOME/deploy-backups/htdocs-backup-$STAMP.tar.gz\"; ls -la \"\$HOME/deploy-backups\" | tail -5; else echo 'Target directory is empty or new - nothing to back up.'; fi"
+
+          ssh $SSH_OPTS "$VPS_USER@$VPS_HOST" "$REMOTE_CMD"
+
+      - name: Sync site files (no --delete; additive/overwrite only)
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+          VPS_REMOTE_PATH: ${{ secrets.VPS_REMOTE_PATH }}
+        run: |
+          set -euo pipefail
+          rsync -az --itemize-changes \
+            -e "ssh $SSH_OPTS" \
+            --include='*.html' \
+            --include='assets/***' \
+            --exclude='*' \
+            ./ "$VPS_USER@$VPS_HOST:$VPS_REMOTE_PATH/"
+
+      - name: Fix permissions for Nginx
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+          VPS_REMOTE_PATH: ${{ secrets.VPS_REMOTE_PATH }}
+        run: |
+          set -euo pipefail
+          REMOTE_CMD="set -euo pipefail; find '$VPS_REMOTE_PATH' -type d -exec chmod 755 {} \\; ; find '$VPS_REMOTE_PATH' -type f -exec chmod 644 {} \\; ; echo 'Permissions normalized (dirs 755, files 644).'"
+
+          ssh $SSH_OPTS "$VPS_USER@$VPS_HOST" "$REMOTE_CMD"
+
+      - name: Record deploy metadata on the server (outside the web root content)
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+          DEPLOY_SHA: ${{ github.sha }}
+          DEPLOY_REF: ${{ github.ref_name }}
+          DEPLOY_ACTOR: ${{ github.actor }}
+          DEPLOY_RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          REMOTE_CMD="mkdir -p \"\$HOME/deploy-backups\"; { echo 'commit=$DEPLOY_SHA'; echo 'ref=$DEPLOY_REF'; echo 'ran_by=$DEPLOY_ACTOR'; echo 'run_id=$DEPLOY_RUN_ID'; echo \"timestamp_utc=\$(date -u +%FT%TZ)\"; echo '---'; } >> \"\$HOME/deploy-backups/last-deploy.log\"; echo 'Deploy metadata recorded.'"
+
+          ssh $SSH_OPTS "$VPS_USER@$VPS_HOST" "$REMOTE_CMD"
+
+  # ---------------------------------------------------------------------
+  # Validates the deploy. File-presence-on-disk (over SSH) is the
+  # authoritative, DNS/SSL-independent check. DNS and HTTPS are reported
+  # as separate, clearly-labeled signals — their absence does not mean
+  # the deploy failed.
+  # ---------------------------------------------------------------------
+  verify:
+    name: Verify deployment
+    needs: deploy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set up pinned SSH known_hosts and deploy key
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "${{ secrets.VPS_SSH_HOST_KEY }}" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
+          printf '%s\n' "${{ secrets.VPS_SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          echo "SSH_OPTS=-i $HOME/.ssh/deploy_key -o UserKnownHostsFile=$HOME/.ssh/known_hosts -o StrictHostKeyChecking=yes -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=15" >> "$GITHUB_ENV"
+
+      - name: Authoritative check — files present on disk via SSH
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+          VPS_REMOTE_PATH: ${{ secrets.VPS_REMOTE_PATH }}
+        run: |
+          set -euo pipefail
+          REMOTE_CMD="set -euo pipefail; cd '$VPS_REMOTE_PATH'; fail=0; for f in index.html assets/css/style.css assets/js/main.js assets/js/animations.js assets/images/logo-old-hickory-dealer.png; do if [ -s \"\$f\" ]; then echo \"OK   \$f (\$(stat -c%s \"\$f\") bytes)\"; else echo \"::error::MISSING or empty on server: \$f\"; fail=1; fi; done; exit \$fail"
+
+          ssh $SSH_OPTS "$VPS_USER@$VPS_HOST" "$REMOTE_CMD"
+
+      - name: DNS resolution check (informational — does not fail the run)
+        env:
+          SITE_URL: ${{ secrets.SITE_URL }}
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+        run: |
+          HOSTNAME=$(echo "$SITE_URL" | sed -E 's#^https?://##; s#/.*##')
+          echo "Resolving $HOSTNAME ..."
+          RESOLVED=$(getent hosts "$HOSTNAME" 2>/dev/null | awk '{print $1}' | head -1 || true)
+          if [ -n "$RESOLVED" ]; then
+            echo "DNS_STATUS=resolved ($HOSTNAME -> $RESOLVED)"
+            if [ "$RESOLVED" != "$VPS_HOST" ]; then
+              echo "::warning::$HOSTNAME resolves to $RESOLVED, which does not match VPS_HOST ($VPS_HOST). DNS may point elsewhere."
+            fi
+          else
+            echo "DNS_STATUS=not_resolved — $HOSTNAME does not resolve yet. This is a DNS/propagation matter, separate from the deployment itself, which already completed and was verified via SSH above."
+          fi
+
+      - name: HTTPS check by domain (informational — does not fail the run)
+        env:
+          SITE_URL: ${{ secrets.SITE_URL }}
+        run: |
+          HOSTNAME=$(echo "$SITE_URL" | sed -E 's#^https?://##; s#/.*##')
+          if getent hosts "$HOSTNAME" >/dev/null 2>&1; then
+            CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 "$SITE_URL/" || echo "000")
+            echo "HTTPS_STATUS=$CODE for $SITE_URL/"
+            if [ "$CODE" = "000" ]; then
+              echo "::warning::Could not reach $SITE_URL over HTTPS (connection/SSL issue). The file deploy itself already succeeded and was verified over SSH above."
+            fi
+          else
+            echo "HTTPS_STATUS=skipped — DNS does not resolve yet, so an HTTPS check would be meaningless. Report this as a DNS/propagation item, not a deploy failure."
+          fi
+
+      - name: Best-effort reachability check by raw IP (bypasses DNS)
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          SITE_URL: ${{ secrets.SITE_URL }}
+        run: |
+          HOSTNAME=$(echo "$SITE_URL" | sed -E 's#^https?://##; s#/.*##')
+          CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 -k -H "Host: $HOSTNAME" "https://$VPS_HOST/" || echo "000")
+          echo "IP_HOST_HEADER_HTTPS_STATUS=$CODE (https://$VPS_HOST/ with Host: $HOSTNAME)"
+          CODE_HTTP=$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 -H "Host: $HOSTNAME" "http://$VPS_HOST/" || echo "000")
+          echo "IP_HOST_HEADER_HTTP_STATUS=$CODE_HTTP (http://$VPS_HOST/ with Host: $HOSTNAME)"
+
+      - name: Summary
+        run: |
+          echo "## Deploy verification summary" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Commit deployed: \`${{ github.sha }}\` (${{ github.ref_name }})" >> "$GITHUB_STEP_SUMMARY"
+          echo "- File-on-disk check: see 'Authoritative check' step above (this is the real pass/fail signal for the deploy itself)" >> "$GITHUB_STEP_SUMMARY"
+          echo "- DNS/HTTPS checks above are informational — a domain that has not propagated yet or has no SSL cert issued does NOT mean the deployment failed." >> "$GITHUB_STEP_SUMMARY"
