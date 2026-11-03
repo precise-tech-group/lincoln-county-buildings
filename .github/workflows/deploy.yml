@@ -114,15 +114,20 @@ jobs:
           VPS_REMOTE_PATH: ${{ secrets.VPS_REMOTE_PATH }}
         run: |
           set -euo pipefail
-          case "$VPS_REMOTE_PATH" in
-            */lincolncountybuildings.preciseclientdemo.online*) ;;
-            *)
-              echo "::error::VPS_REMOTE_PATH ('$VPS_REMOTE_PATH') does not look like the expected site directory. Refusing to deploy."
-              exit 1
-              ;;
-          esac
+          # Exact match only — not a substring check. A substring check
+          # (e.g. "contains the domain name somewhere") previously let a
+          # corrupted path value through, because the corrupted value
+          # still happened to contain the domain name as a trailing
+          # fragment. Any deviation at all (wrong prefix, missing leading
+          # slash, trailing slash, stray characters from shell/path
+          # mangling) must be rejected outright.
+          EXPECTED_PATH="/home/lincolncountybuildings/htdocs/lincolncountybuildings.preciseclientdemo.online"
+          if [ "$VPS_REMOTE_PATH" != "$EXPECTED_PATH" ]; then
+            echo "::error::VPS_REMOTE_PATH does not exactly match the expected absolute path. Refusing to deploy. Check the secret for a missing leading slash, trailing slash, or mangling introduced by a Windows/Git-Bash shell when the secret was set (that exact bug caused a prior incident where files silently landed at a 'C:/Program Files/Git/...'-prefixed path instead of the real web root)."
+            exit 1
+          fi
 
-          REMOTE_CMD="set -euo pipefail; W=\$(whoami); echo \"Connected as: \$W\"; if [ \"\$W\" = root ]; then echo '::error::Refusing to deploy as root - must use the scoped CloudPanel site user.'; exit 1; fi; mkdir -p '$VPS_REMOTE_PATH'; if [ ! -d '$VPS_REMOTE_PATH' ]; then echo '::error::Target directory does not exist and could not be created: $VPS_REMOTE_PATH'; exit 1; fi; echo \"Target directory confirmed: $VPS_REMOTE_PATH\"; ls -la '$VPS_REMOTE_PATH' | head -20"
+          REMOTE_CMD="set -euo pipefail; W=\$(whoami); echo \"Connected as: \$W\"; if [ \"\$W\" = root ]; then echo '::error::Refusing to deploy as root - must use the scoped CloudPanel site user.'; exit 1; fi; mkdir -p '$VPS_REMOTE_PATH'; if [ ! -d '$VPS_REMOTE_PATH' ]; then echo '::error::Target directory does not exist and could not be created: $VPS_REMOTE_PATH'; exit 1; fi; case \"\$(cd '$VPS_REMOTE_PATH' && pwd)\" in '$VPS_REMOTE_PATH') ;; *) echo '::error::Resolved absolute path does not match the intended target after cd - refusing to continue.'; exit 1;; esac; echo \"Target directory confirmed: $VPS_REMOTE_PATH\"; ls -la '$VPS_REMOTE_PATH' | head -20"
 
           ssh $SSH_OPTS "$VPS_USER@$VPS_HOST" "$REMOTE_CMD"
 
@@ -201,14 +206,27 @@ jobs:
           chmod 600 ~/.ssh/deploy_key
           echo "SSH_OPTS=-i $HOME/.ssh/deploy_key -o UserKnownHostsFile=$HOME/.ssh/known_hosts -o StrictHostKeyChecking=yes -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=15" >> "$GITHUB_ENV"
 
-      - name: Authoritative check — files present on disk via SSH
+      - name: Authoritative check — exact path, real file presence, AND real content on disk via SSH
         env:
           VPS_HOST: ${{ secrets.VPS_HOST }}
           VPS_USER: ${{ secrets.VPS_USER }}
           VPS_REMOTE_PATH: ${{ secrets.VPS_REMOTE_PATH }}
         run: |
           set -euo pipefail
-          REMOTE_CMD="set -euo pipefail; cd '$VPS_REMOTE_PATH'; fail=0; for f in index.html assets/css/style.css assets/js/main.js assets/js/animations.js assets/images/logo-old-hickory-dealer.png; do if [ -s \"\$f\" ]; then echo \"OK   \$f (\$(stat -c%s \"\$f\") bytes)\"; else echo \"::error::MISSING or empty on server: \$f\"; fail=1; fi; done; exit \$fail"
+          EXPECTED_PATH="/home/lincolncountybuildings/htdocs/lincolncountybuildings.preciseclientdemo.online"
+          if [ "$VPS_REMOTE_PATH" != "$EXPECTED_PATH" ]; then
+            echo "::error::VPS_REMOTE_PATH does not exactly match the expected absolute path. Refusing to verify against the wrong location."
+            exit 1
+          fi
+
+          # File presence/size is necessary but NOT sufficient — a prior
+          # incident deployed real files to a WRONG path that still had
+          # plausible-looking files on it, and a presence-only check
+          # reported false success. This step additionally reads
+          # index.html's actual content and requires BOTH a real-site
+          # marker string AND the absence of CloudPanel's default
+          # placeholder page.
+          REMOTE_CMD="set -euo pipefail; cd '$VPS_REMOTE_PATH'; fail=0; for f in index.html assets/css/style.css assets/js/main.js assets/js/animations.js assets/images/logo-old-hickory-dealer.png; do if [ -s \"\$f\" ]; then echo \"OK   \$f (\$(stat -c%s \"\$f\") bytes)\"; else echo \"::error::MISSING or empty on server: \$f\"; fail=1; fi; done; if grep -qi 'hello world' index.html 2>/dev/null; then echo '::error::index.html still contains CloudPanel default placeholder text (\"Hello World\") - the real site was NOT deployed to this path.'; fail=1; fi; if ! grep -q 'Lincoln County Buildings' index.html 2>/dev/null; then echo '::error::index.html does not contain the expected site marker text (\"Lincoln County Buildings\") - this is not the real homepage.'; fail=1; fi; if [ \"\$fail\" -eq 0 ]; then echo 'Content check passed: real site homepage confirmed, placeholder page confirmed absent.'; fi; exit \$fail"
 
           ssh $SSH_OPTS "$VPS_USER@$VPS_HOST" "$REMOTE_CMD"
 
@@ -229,31 +247,59 @@ jobs:
             echo "DNS_STATUS=not_resolved — $HOSTNAME does not resolve yet. This is a DNS/propagation matter, separate from the deployment itself, which already completed and was verified via SSH above."
           fi
 
-      - name: HTTPS check by domain (informational — does not fail the run)
+      - name: HTTPS check by domain — status, certificate, AND actual content (informational — does not fail the run)
         env:
           SITE_URL: ${{ secrets.SITE_URL }}
         run: |
           HOSTNAME=$(echo "$SITE_URL" | sed -E 's#^https?://##; s#/.*##')
           if getent hosts "$HOSTNAME" >/dev/null 2>&1; then
+            BODY=$(curl -s --max-time 15 "$SITE_URL/" || true)
             CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 "$SITE_URL/" || echo "000")
             echo "HTTPS_STATUS=$CODE for $SITE_URL/"
             if [ "$CODE" = "000" ]; then
-              echo "::warning::Could not reach $SITE_URL over HTTPS (connection/SSL issue). The file deploy itself already succeeded and was verified over SSH above."
+              CERT_PROBE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 -k "$SITE_URL/" || echo "000")
+              if [ "$CERT_PROBE" != "000" ]; then
+                echo "::warning::CERTIFICATE ISSUE for $SITE_URL — the site responds when SSL verification is skipped (-k) but not with normal verification. This is an SSL/certificate problem, separate from the file deployment, which was already verified over SSH."
+              else
+                echo "::warning::Could not reach $SITE_URL at all (connection-level, not just SSL). The file deploy itself already succeeded and was verified over SSH above."
+              fi
+            else
+              if echo "$BODY" | grep -qi 'hello world'; then
+                echo "::warning::$SITE_URL is still serving the CloudPanel default placeholder page over HTTPS, even though the SSH-side file check passed. This likely means Nginx's configured document root for this vhost differs from VPS_REMOTE_PATH, or there is a caching layer in front of it — investigate the Nginx site config, not the deploy workflow."
+              elif echo "$BODY" | grep -q 'Lincoln County Buildings'; then
+                echo "CONTENT_CHECK=passed — $SITE_URL is serving the real site content."
+              else
+                echo "::warning::$SITE_URL responded $CODE but the body matched neither the real site marker nor the known placeholder text — inspect manually."
+              fi
             fi
           else
-            echo "HTTPS_STATUS=skipped — DNS does not resolve yet, so an HTTPS check would be meaningless. Report this as a DNS/propagation item, not a deploy failure."
+            echo "HTTPS_STATUS=skipped — DNS does not resolve yet, so an HTTPS/content check would be meaningless. Report this as a DNS/propagation item, not a deploy failure."
           fi
 
-      - name: Best-effort reachability check by raw IP (bypasses DNS)
+      - name: Best-effort reachability + content check by raw IP (bypasses DNS)
         env:
           VPS_HOST: ${{ secrets.VPS_HOST }}
           SITE_URL: ${{ secrets.SITE_URL }}
         run: |
           HOSTNAME=$(echo "$SITE_URL" | sed -E 's#^https?://##; s#/.*##')
+
+          BODY_HTTPS=$(curl -s --max-time 15 -k -H "Host: $HOSTNAME" "https://$VPS_HOST/" || true)
           CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 -k -H "Host: $HOSTNAME" "https://$VPS_HOST/" || echo "000")
           echo "IP_HOST_HEADER_HTTPS_STATUS=$CODE (https://$VPS_HOST/ with Host: $HOSTNAME)"
+          if echo "$BODY_HTTPS" | grep -qi 'hello world'; then
+            echo "::warning::Direct-IP HTTPS request (Host: $HOSTNAME) still returns the CloudPanel placeholder page. Check the Nginx vhost document root for this Host header."
+          elif echo "$BODY_HTTPS" | grep -q 'Lincoln County Buildings'; then
+            echo "IP_HTTPS_CONTENT_CHECK=passed"
+          fi
+
+          BODY_HTTP=$(curl -s --max-time 15 -H "Host: $HOSTNAME" "http://$VPS_HOST/" || true)
           CODE_HTTP=$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 -H "Host: $HOSTNAME" "http://$VPS_HOST/" || echo "000")
           echo "IP_HOST_HEADER_HTTP_STATUS=$CODE_HTTP (http://$VPS_HOST/ with Host: $HOSTNAME)"
+          if echo "$BODY_HTTP" | grep -qi 'hello world'; then
+            echo "::warning::Direct-IP HTTP request (Host: $HOSTNAME) still returns the CloudPanel placeholder page. Check the Nginx vhost document root for this Host header."
+          elif echo "$BODY_HTTP" | grep -q 'Lincoln County Buildings'; then
+            echo "IP_HTTP_CONTENT_CHECK=passed"
+          fi
 
       - name: Summary
         run: |
