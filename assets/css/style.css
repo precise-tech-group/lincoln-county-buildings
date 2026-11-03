@@ -292,6 +292,11 @@ p { color: var(--color-text-muted); }
 
 .magnetic { will-change: transform; }
 
+/* A button directly following body copy always gets breathing room —
+   fixes inconsistent cramped spacing where some instances had a manual
+   inline margin-top and others didn't. */
+p + .btn, p + a.btn { margin-top: var(--sp-5); }
+
 /* ==========================================================================
    Header + mega-menu dropdown (rebuilt for a continuous hover/focus area)
    ========================================================================== */
@@ -566,7 +571,7 @@ p { color: var(--color-text-muted); }
 }
 
 .reveal { opacity: 0; }
-.js-split-line { overflow: hidden; display: block; }
+.js-split-line { overflow: hidden; display: block; padding-bottom: 0.16em; margin-bottom: -0.16em; }
 
 /* ==========================================================================
    Hero — asymmetrical split composition (editorial, not centered-on-photo)
@@ -709,7 +714,6 @@ p { color: var(--color-text-muted); }
   overflow-x: auto;
   scroll-snap-type: x proximity;
   padding-bottom: var(--sp-2);
-  margin: 0 calc(var(--container-pad) * -1);
   padding-inline: var(--container-pad);
 }
 .trust-rail-track::-webkit-scrollbar { height: 0; }
@@ -986,6 +990,7 @@ p { color: var(--color-text-muted); }
    Old Hickory brand / trust section
    ========================================================================== */
 .brand-trust { background: var(--color-navy-950); color: var(--color-cream); overflow: hidden; }
+.brand-trust h2, .brand-trust h3, .brand-trust h4 { color: var(--color-cream); }
 .brand-trust-grid { display: grid; grid-template-columns: 0.8fr 1.2fr; gap: var(--sp-8); align-items: center; }
 .brand-trust-logo { background: var(--color-cream); border-radius: var(--radius-md); padding: var(--sp-6); display: flex; align-items: center; justify-content: center; }
 .brand-trust-logo img { width: 100%; max-width: 340px; }
