@@ -6,8 +6,12 @@ lofted barns, garages, animal shelters, greenhouses, cabanas, and specialty buil
 engineer-certified construction, free local delivery, and a rent-to-own purchase option.
 
 This is a full creative rebuild of the client's existing site, preserving all real business
-information (services, sizes, pricing snapshot, warranty terms, contact details) while
-replacing the dated template design with a cinematic, animation-driven experience.
+information, brand identity, and logo (services, sizes, pricing snapshot, warranty terms,
+contact details) while replacing the dated template design with a premium editorial
+experience: an asymmetrical split hero, an interactive Size Explorer and Building Explorer,
+and cinematic scroll animation throughout. The color system is sampled directly from the
+client's real Old Hickory Buildings & Sheds dealer logo (deep teal-navy `#145c7c` + gold
+`#ecbc54` + warm cream), paired with Fraunces (display) and Inter (body) type.
 
 ## Technology stack
 

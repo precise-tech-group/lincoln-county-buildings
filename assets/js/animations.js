@@ -161,6 +161,21 @@
     });
   }
 
+  /* ---------------- Clip-path image entrances ---------------- */
+  gsap.utils.toArray("[data-clip-reveal]").forEach((el) => {
+    gsap.fromTo(
+      el,
+      { clipPath: "inset(12% 12% 12% 12% round 2px)", opacity: 0.4 },
+      {
+        clipPath: "inset(0% 0% 0% 0% round 2px)",
+        opacity: 1,
+        duration: 1.1,
+        ease: "power3.out",
+        scrollTrigger: { trigger: el, start: "top 82%" },
+      }
+    );
+  });
+
   window.addEventListener("load", () => ScrollTrigger.refresh());
 
   /* ==================================================================
@@ -181,20 +196,20 @@
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     renderer.setSize(canvas.clientWidth, canvas.clientHeight, false);
 
-    const rustColor = 0xd6691f;
-    const steelColor = 0x9aa7b0;
+    const goldColor = 0xecbc54;
+    const lineColor = 0xbcdce9;
 
     /* Blueprint ground grid */
-    const grid = new THREE.GridHelper(40, 40, 0x3a4752, 0x232a31);
+    const grid = new THREE.GridHelper(40, 40, 0x2a89b3, 0x145c7c);
     grid.position.y = -2.2;
     grid.material.transparent = true;
-    grid.material.opacity = 0.35;
+    grid.material.opacity = 0.3;
     scene.add(grid);
 
-    /* Procedural steel gable-frame building skeleton (wireframe) */
+    /* Procedural gable-frame building skeleton (wireframe blueprint) */
     const frameGroup = new THREE.Group();
-    const beamMat = new THREE.LineBasicMaterial({ color: steelColor, transparent: true, opacity: 0.75 });
-    const accentMat = new THREE.LineBasicMaterial({ color: rustColor, transparent: true, opacity: 0.9 });
+    const beamMat = new THREE.LineBasicMaterial({ color: lineColor, transparent: true, opacity: 0.8 });
+    const accentMat = new THREE.LineBasicMaterial({ color: goldColor, transparent: true, opacity: 0.95 });
 
     const bays = 5;
     const width = 6;
