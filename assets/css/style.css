@@ -702,23 +702,34 @@ p + .btn, p + a.btn { margin-top: var(--sp-5); }
 .breadcrumb a:hover { color: var(--color-cream); }
 
 /* ==========================================================================
-   Trust rail — horizontal scroll-snap strip (replaces old badge row)
+   Trust rail — continuous auto-scrolling marquee (replaces old badge row)
    ========================================================================== */
 .trust-rail { padding-block: var(--sp-6); background: var(--color-navy-950); overflow: hidden; }
 .trust-rail-head { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: var(--sp-4); }
 .trust-rail-head .eyebrow { color: var(--color-gold-400); }
 .trust-rail-head .eyebrow::before { background: var(--color-gold-400); }
 .trust-rail-track {
+  overflow: hidden;
+  -webkit-mask-image: linear-gradient(90deg, transparent 0, #000 var(--container-pad), #000 calc(100% - var(--container-pad)), transparent 100%);
+  mask-image: linear-gradient(90deg, transparent 0, #000 var(--container-pad), #000 calc(100% - var(--container-pad)), transparent 100%);
+}
+.trust-rail-marquee {
+  display: flex;
+  width: max-content;
+  animation: trust-marquee 34s linear infinite;
+}
+.trust-rail-marquee:hover, .trust-rail-marquee:focus-within { animation-play-state: paused; }
+.trust-rail-set {
   display: flex;
   gap: var(--sp-4);
-  overflow-x: auto;
-  scroll-snap-type: x proximity;
-  padding-bottom: var(--sp-2);
-  padding-inline: var(--container-pad);
+  padding-left: var(--container-pad);
+  flex-shrink: 0;
 }
-.trust-rail-track::-webkit-scrollbar { height: 0; }
+@keyframes trust-marquee {
+  from { transform: translateX(0); }
+  to { transform: translateX(-50%); }
+}
 .trust-card {
-  scroll-snap-align: start;
   flex: 0 0 260px;
   background: rgba(250,246,236,0.05);
   border: 1px solid var(--color-border-inverse);
